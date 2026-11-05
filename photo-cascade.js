@@ -11,7 +11,6 @@ const MAX_FAILURES = 3;
 const queue = [];
 const seedQueue = [];
 
-let paused = false;
 let help = false;
 let intervalSeconds = 5;
 let failedPreloads = 0;
@@ -21,6 +20,23 @@ let hiddenImage  = imageB;
 
 let timeoutId;
 let opacityTimeoutId;
+let state = { kind: "initializing" };
+
+function scheduleUpdate(delay) {
+    clearTimeout(timeoutId);
+    state = { kind: "waiting" };
+    timeoutId = setTimeout(runScheduledUpdate, delay);
+}
+
+function runScheduledUpdate() {
+    timeoutId = undefined;
+    if (state.kind === "waiting") { startUpdate(); }
+}
+
+function startUpdate() {
+    state = { kind: "loading" };
+    updateImage();
+}
 
 function fetchImage() {
     try {
@@ -91,21 +107,31 @@ function transitionImage(backgroundImage) {
 
 async function updateImage() {
 
-    if (paused) { return; }
+    try {
+        if (queue.length === 0) {
+            await queueImage();
+        }
 
-    if (queue.length === 0) {
+        if (state.kind !== "loading") { return; }
+
+        if (queue.length > 0) {
+            const img = queue.shift();
+            transitionImage(`url(${img.src})`);
+        }
+
         await queueImage();
-    }
-
-    if (queue.length > 0) {
-        const img = queue.shift();
-        transitionImage(`url(${img.src})`);
-    }
-
-    await queueImage();
-
-    if (!paused) {
-        timeoutId = setTimeout(updateImage, intervalSeconds * 1000);
+    } finally {
+        switch (state.kind) {
+        case "loading":
+            scheduleUpdate(intervalSeconds * 1000);
+            break;
+        case "loading-paused":
+            state = { kind: "paused" };
+            break;
+        case "loading-resuming":
+            scheduleUpdate(Math.max(0, state.resumeAt - Date.now()));
+            break;
+        }
     }
 }
 
@@ -121,15 +147,36 @@ function flashMessageHTML(message) {
 }
 
 function togglePause() {
-    if (paused) {
-        timeoutId = setTimeout(updateImage, 1000);
+    switch (state.kind) {
+    case "paused":
+        scheduleUpdate(1000);
         flashMessageHTML("Resuming");
-    } else {
-        clearTimeout(timeoutId);
+        break;
+    case "initializing-paused":
+        state = { kind: "initializing-resuming", resumeAt: Date.now() + 1000 };
+        flashMessageHTML("Resuming");
+        break;
+    case "loading-paused":
+        state = { kind: "loading-resuming", resumeAt: Date.now() + 1000 };
+        flashMessageHTML("Resuming");
+        break;
+    case "initializing":
+    case "initializing-resuming":
+        state = { kind: "initializing-paused" };
         flashMessageHTML("Pausing");
+        break;
+    case "loading":
+    case "loading-resuming":
+        state = { kind: "loading-paused" };
+        flashMessageHTML("Pausing");
+        break;
+    case "waiting":
+        clearTimeout(timeoutId);
+        timeoutId = undefined;
+        state = { kind: "paused" };
+        flashMessageHTML("Pausing");
+        break;
     }
-
-    paused = !paused;
 }
 
 function toggleHelp() {
@@ -164,7 +211,17 @@ function decrementInterval() {
     for (let i = 0; i < PRELOAD; i++) {
         await queueImage();
     }
-    updateImage();
+    switch (state.kind) {
+    case "initializing":
+        startUpdate();
+        break;
+    case "initializing-paused":
+        state = { kind: "paused" };
+        break;
+    case "initializing-resuming":
+        scheduleUpdate(Math.max(0, state.resumeAt - Date.now()));
+        break;
+    }
 })();
 
 document.addEventListener('keydown', (event) => {
