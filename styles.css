@@ -1,0 +1,87 @@
+body {
+    background-color: black;
+}
+
+.image {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-size: cover;
+    background-position: center;
+
+    /* These properties are overriden for `#image-a` and `#image-b` are animated by
+   `transitionImage()` to animate opacity and smoothly wipe between images. */
+    opacity: 0%;
+    z-index: 0;
+    transition: opacity 0s ease-in-out;
+}
+
+.image.visible {
+    opacity: 100%;
+    z-index: 1;
+}
+
+.text-box {
+    position: fixed;
+    height: fit-content;
+    background-color: royalblue;
+    color: white;
+    font-family: sans-serif;
+    border-radius: 5px;
+    border-width: 2px;
+    border-style: solid;
+    border-color: white;
+}
+
+.text-box h1 {
+    font-style: italic;
+    font-family: monospace;
+    margin: 10px;
+}
+
+.text-box p {
+    margin: 5px;
+}
+
+.text-box a {
+    color: inherit;
+    font-weight: bold;
+    text-decoration: none;
+}
+
+.text-box nav a {
+    font-weight: initial;
+    font-style: italic;
+}
+
+a:hover {
+    text-decoration: underline;
+    font-style: italic;
+}
+
+.text-box hr {
+    margin: 7px;
+    border-color: inherit;
+}
+
+#message {
+    width: fit-content;
+    z-index: 2;
+    opacity: 0%;
+    transition: opacity 1s ease-in;
+}
+
+#message.visible {
+    opacity: 100%;
+    transition: opacity 0.1s ease-out;
+}
+
+#help {
+    width: 20em;
+    z-index: 3;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+}
