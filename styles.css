@@ -80,6 +80,10 @@ a:hover {
 
 #help {
     width: 20em;
+    max-width: calc(100vw - 2rem);
+    max-height: calc(100vh - 2rem);
+    box-sizing: border-box;
+    overflow: auto;
     z-index: 3;
     top: 50%;
     left: 50%;
