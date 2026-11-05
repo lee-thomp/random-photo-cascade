@@ -4,12 +4,18 @@ const messageContainer = document.getElementById("message");
 const helpContainer = document.getElementById("help");
 
 const PRELOAD = 3;
-const SEED_HISTORY = 32;
+const HISTORY_LIMIT = 100;
+const CACHE_RADIUS = 3;
+const MANUAL_FADE_SECONDS = 0.15;
 const MIN_INTERVAL_SECONDS = 1;
 const MAX_FAILURES = 3;
 
 const queue = [];
-const seedQueue = [];
+let futureLoad;
+const history = [];
+const historyCache = new Map();
+let historyCursor = -1;
+let seedCounter = 0;
 
 let help = false;
 let intervalSeconds = 5;
@@ -34,28 +40,23 @@ function runScheduledUpdate() {
 }
 
 function startUpdate() {
-    state = { kind: "loading" };
-    updateImage();
+    const run = {};
+    state = { kind: "loading", run };
+    updateImage(run);
 }
 
-function fetchImage() {
-    try {
-        const width = window.innerWidth;
-        const height = window.innerHeight;
-        const seed = Date.now();
-        const imageUrl = `https://picsum.photos/seed/${seed}/${width}/${height}`;
+function makeSlide() {
+    const seed = `${Date.now()}-${seedCounter++}`;
+    const url = `https://picsum.photos/seed/${seed}/${window.innerWidth}/${window.innerHeight}`;
+    return { seed, url };
+}
 
-        // Check this if a cool image has just flashed by and you want to see it
-        // again.  You'll have to do some manual fiddling right now to get it
-        // back up but don't worry I'm working on implementing this!
-        seedQueue.push(seed);
-        if (seedQueue.length > SEED_HISTORY) { seedQueue.shift(); }
-
-        return imageUrl;
-    } catch (error) {
-        console.error('Error fetching image:', error);
-        return null;
-    }
+function rememberSlide(slide) {
+    history.push({ seed: slide.seed, url: slide.url });
+    if (history.length > HISTORY_LIMIT) { history.shift(); }
+    historyCursor = history.length - 1;
+    historyCache.set(slide.url, { promise: Promise.resolve(slide.image) });
+    warmHistoryCache();
 }
 
 function preloadImage(url) {
@@ -67,37 +68,90 @@ function preloadImage(url) {
     });
 }
 
-async function queueImage() {
-    if (queue.length >= PRELOAD) {
-        return;
+function startHistoryLoad(url) {
+    const image = new Image();
+    let rejectLoad;
+    let settled = false;
+    const promise = new Promise((resolve, reject) => {
+        rejectLoad = reject;
+        image.onload = () => { settled = true; resolve(image); };
+        image.onerror = () => { settled = true; reject(new Error(`Failed to load ${url}`)); };
+        image.src = url;
+    });
+    return {
+        promise,
+        cancel() {
+            if (settled) { return; }
+            settled = true;
+            image.onload = null;
+            image.onerror = null;
+            image.src = "";
+            rejectLoad(new Error(`Cancelled load of ${url}`));
+        },
+    };
+}
+
+function loadHistoryImage(url) {
+    if (!historyCache.has(url)) {
+        const entry = startHistoryLoad(url);
+        entry.promise = entry.promise.catch(error => {
+            if (historyCache.get(url) === entry) { historyCache.delete(url); }
+            throw error;
+        });
+        historyCache.set(url, entry);
     }
+    return historyCache.get(url).promise;
+}
 
-    const imageUrl = fetchImage();
-
-    if (!imageUrl) {
-        return;
+function pruneHistoryCache(centerIndex) {
+    const nearby = new Set();
+    const first = Math.max(0, centerIndex - CACHE_RADIUS);
+    const last = Math.min(history.length - 1, centerIndex + CACHE_RADIUS);
+    for (let index = first; index <= last; index++) {
+        nearby.add(history[index].url);
     }
-
-    try {
-        const img = await preloadImage(imageUrl);
-        queue.push(img);
-        failedPreloads = 0;
-    } catch(e) {
-        console.error(`Error preloading image: ${e.message}`);
-        ++failedPreloads;
-
-        if (MAX_FAILURES === failedPreloads) {
-            flashMessageHTML("Trouble loading images");
+    for (const [url, entry] of historyCache) {
+        if (!nearby.has(url)) {
+            entry.cancel?.();
+            historyCache.delete(url);
         }
+    }
+    return nearby;
+}
+
+function warmHistoryCache() {
+    const nearby = pruneHistoryCache(historyCursor);
+    for (const url of nearby) {
+        loadHistoryImage(url).catch(() => {});
     }
 }
 
-function transitionImage(backgroundImage) {
+async function queueImage() {
+    if (futureLoad) { return futureLoad; }
+    if (queue.length >= PRELOAD) { return; }
 
-    const fadeSeconds = `${intervalSeconds / 5}s`;
+    const slide = makeSlide();
+    futureLoad = preloadImage(slide.url).then(image => {
+        if (queue.length < PRELOAD) { queue.push({ ...slide, image }); }
+        failedPreloads = 0;
+    }).catch(error => {
+        console.error(`Error preloading image: ${error.message}`);
+        ++failedPreloads;
+        if (MAX_FAILURES === failedPreloads) {
+            flashMessageHTML("Trouble loading images");
+        }
+    }).finally(() => {
+        futureLoad = undefined;
+    });
+    return futureLoad;
+}
+
+function transitionImage(backgroundImage, fadeSeconds = intervalSeconds / 5) {
+
+    const fadeDuration = `${fadeSeconds}s`;
     hiddenImage.style.backgroundImage = backgroundImage;
-    hiddenImage.style.transitionDuration = fadeSeconds;
-    visibleImage.style.transitionDuration = fadeSeconds;
+    hiddenImage.style.transitionDuration = fadeDuration;
+    visibleImage.style.transitionDuration = fadeDuration;
 
     hiddenImage.classList.add("visible");
     visibleImage.classList.remove("visible");
@@ -105,22 +159,38 @@ function transitionImage(backgroundImage) {
     [visibleImage, hiddenImage] = [hiddenImage, visibleImage];
 }
 
-async function updateImage() {
+async function updateImage(run) {
 
     try {
-        if (queue.length === 0) {
+        if (historyCursor < history.length - 1) {
+            const nextIndex = historyCursor + 1;
+            const image = await loadHistoryImage(history[nextIndex].url);
+            if (state.kind !== "loading" || state.run !== run) { return; }
+            historyCursor = nextIndex;
+            transitionImage(`url(${image.src})`);
+            warmHistoryCache();
+        } else {
+            if (queue.length === 0) {
+                await queueImage();
+            }
+
+            if (state.kind !== "loading" || state.run !== run) { return; }
+
+            if (queue.length > 0) {
+                const slide = queue.shift();
+                transitionImage(`url(${slide.url})`);
+                rememberSlide(slide);
+            }
+
             await queueImage();
         }
-
-        if (state.kind !== "loading") { return; }
-
-        if (queue.length > 0) {
-            const img = queue.shift();
-            transitionImage(`url(${img.src})`);
+    } catch (error) {
+        if (state.run === run) {
+            console.error(`Error loading history image: ${error.message}`);
+            flashMessageHTML("Trouble loading history image");
         }
-
-        await queueImage();
     } finally {
+        if (state.run !== run) { return; }
         switch (state.kind) {
         case "loading":
             scheduleUpdate(intervalSeconds * 1000);
@@ -148,6 +218,15 @@ function flashMessageHTML(message) {
 
 function togglePause() {
     switch (state.kind) {
+    case "seeking":
+        if (state.resumeAt === undefined) {
+            state.resumeAt = Date.now() + 1000;
+            flashMessageHTML("Resuming");
+        } else {
+            state.resumeAt = undefined;
+            flashMessageHTML("Pausing");
+        }
+        break;
     case "paused":
         scheduleUpdate(1000);
         flashMessageHTML("Resuming");
@@ -157,7 +236,7 @@ function togglePause() {
         flashMessageHTML("Resuming");
         break;
     case "loading-paused":
-        state = { kind: "loading-resuming", resumeAt: Date.now() + 1000 };
+        state = { kind: "loading-resuming", run: state.run, resumeAt: Date.now() + 1000 };
         flashMessageHTML("Resuming");
         break;
     case "initializing":
@@ -167,7 +246,7 @@ function togglePause() {
         break;
     case "loading":
     case "loading-resuming":
-        state = { kind: "loading-paused" };
+        state = { kind: "loading-paused", run: state.run };
         flashMessageHTML("Pausing");
         break;
     case "waiting":
@@ -176,6 +255,73 @@ function togglePause() {
         state = { kind: "paused" };
         flashMessageHTML("Pausing");
         break;
+    }
+}
+
+function pausePlayback() {
+    clearTimeout(timeoutId);
+    timeoutId = undefined;
+    switch (state.kind) {
+    case "initializing":
+    case "initializing-resuming":
+        state = { kind: "initializing-paused" };
+        break;
+    case "loading":
+    case "loading-resuming":
+        state = { kind: "loading-paused", run: state.run };
+        break;
+    case "seeking":
+        state.resumeAt = undefined;
+        break;
+    default:
+        state = { kind: "paused" };
+    }
+}
+
+function seekHistory(index, resumeAt) {
+    clearTimeout(timeoutId);
+    timeoutId = undefined;
+    const seek = { kind: "seeking", index, resumeAt };
+    state = seek;
+
+    pruneHistoryCache(index);
+    loadHistoryImage(history[index].url).then(image => {
+        if (state !== seek) { return; }
+        historyCursor = index;
+        transitionImage(`url(${image.src})`, MANUAL_FADE_SECONDS);
+        warmHistoryCache();
+        if (seek.resumeAt === undefined) {
+            state = { kind: "paused" };
+        } else {
+            scheduleUpdate(Math.max(0, seek.resumeAt - Date.now()));
+        }
+    }).catch(error => {
+        if (state !== seek) { return; }
+        state = { kind: "paused" };
+        console.error(`Error loading history image: ${error.message}`);
+        flashMessageHTML("Trouble loading history image");
+    });
+}
+
+function stepHistory(direction) {
+    const index = state.kind === "seeking" ? state.index : historyCursor;
+    if (direction < 0) {
+        pausePlayback();
+        if (index <= 0) {
+            flashMessageHTML("Start of history");
+        } else {
+            seekHistory(index - 1);
+        }
+    } else if (index < history.length - 1) {
+        const nextIndex = index + 1;
+        const resumeAt = nextIndex === history.length - 1 ? Date.now() + 1000 : undefined;
+        seekHistory(nextIndex, resumeAt);
+    } else if (state.kind === "seeking") {
+        state.resumeAt = Date.now() + 1000;
+    } else if (state.kind === "paused" ||
+               state.kind === "initializing-paused" ||
+               state.kind === "loading-paused") {
+        togglePause();
     }
 }
 
@@ -229,6 +375,8 @@ document.addEventListener('keydown', (event) => {
     case ' ': togglePause();            break;
     case '?':
     case 'h': toggleHelp();             break;
+    case 'p': stepHistory(-1);           break;
+    case 'n': stepHistory(1);            break;
     case 'f': toggleFullscreen();       break;
     case '=':
     case '+': incrementInterval();      break;
